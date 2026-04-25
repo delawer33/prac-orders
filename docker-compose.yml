@@ -1,9 +1,65 @@
 services:
   postgres:
+    container_name: orders_postgres
     image: postgres:14
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_DB: postgres 
-      POSTGRES_PASSWORD: 123456
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_HOST_PORT}:5432"
+    volumes:
+      - orders_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - int-services
+
+  orders:
+    container_name: orders_app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${ORDERS_HOST_PORT}:8001"
+    volumes:
+      - ./:/app
+    networks:
+      - int-services
+    command: >
+      sh -c "python -m uvicorn src.application:get_app --host 0.0.0.0 --port 8001 --factory --reload"
+
+  orders-worker:
+    container_name: orders_worker
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    networks:
+      - int-services
+    command: >
+      sh -c "python -m src.workers.compensation_worker"
+
+networks:
+  int-services:
+    name: int-services
+
+volumes:
+  orders_postgres_data:

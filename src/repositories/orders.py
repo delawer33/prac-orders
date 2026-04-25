@@ -21,6 +21,9 @@ async def get_order_with_items(session: AsyncSession, order_id: UUID) -> OrderMo
 
 
 async def create_order(session: AsyncSession, data: OrderCreate) -> OrderModel:
+    if data.user_id is None:
+        raise ValueError("OrderCreate.user_id must be set before persistence")
+
     order = OrderModel(user_id=data.user_id, title=data.title)
     session.add(order)
     await session.flush()

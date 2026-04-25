@@ -1,19 +1,11 @@
 from datetime import datetime
+from typing import List
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from sqlalchemy.orm import DeclarativeMeta, Mapped, declarative_base, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-metadata = sa.MetaData()
-
-
-class BaseServiceModel:
-    @classmethod
-    def on_conflict_constraint(cls) -> tuple | None:
-        return None
-
-
-Base: DeclarativeMeta = declarative_base(metadata=metadata, cls=BaseServiceModel)
+from src.models.base import Base
 
 
 class OrderModel(Base):
@@ -24,7 +16,7 @@ class OrderModel(Base):
     title: Mapped[str] = mapped_column(sa.String(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(sa.DateTime(), default=datetime.utcnow)
 
-    items: Mapped[list["OrderItemModel"]] = relationship(
+    items: Mapped[List["OrderItemModel"]] = relationship(
         "OrderItemModel", back_populates="order", cascade="all, delete-orphan"
     )
 
