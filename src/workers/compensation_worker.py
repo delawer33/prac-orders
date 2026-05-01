@@ -7,67 +7,63 @@ from src.clients import users_client
 from src.config import Settings
 from src.db import SessionFactory
 from src.models.order_creation_sagas import OrderCreationSagaStatus
-from src.repositories import order_idempotency_keys as idempotency_repo
-from src.repositories import order_creation_sagas as saga_repo
+from src.repositories.order_creation_sagas import OrderCreationSagaRepository
 
 logger = logging.getLogger(__name__)
 settings = Settings()
+# Воркер в цикле выполняет две фазы: (1) recovery "зависших" саг, (2) обработку компенсаций
+# со статусом COMPENSATION_PENDING. Каждая сага обрабатывается в отдельной транзакции
 
 
-async def _mark_idempotency_failed(
+async def _mark_order_not_created(
+    saga_repository: OrderCreationSagaRepository,
     *,
-    session,
-    idempotency_key: str,
-    error_code: str,
-    error_message: str,
+    saga,
+    reason: str,
+    details: str,
 ) -> None:
-    idempotency_record = await idempotency_repo.get_key(session, idempotency_key)
-    if not idempotency_record:
-        return
-    await idempotency_repo.mark_key_failed(
-        session=session,
-        record=idempotency_record,
-        error_code=error_code,
-        error_message=error_message,
+    await saga_repository.mark_failed(
+        saga=saga,
+        error_code="order_not_created",
+        error_message=f"{reason}: {details}",
     )
 
 
-async def _recover_saga(session, client, *, saga, reason: str) -> None:
-    # Ветка восстановления для саги, где пользователь уже определен
-    if saga.status == OrderCreationSagaStatus.USER_CREATED:
-        if not saga.resolved_user_created:
-            # Пользователь существовал заранее, компенсация не требуется
-            await saga_repo.mark_failed(
-                session=session,
-                saga=saga,
-                error=f"{reason}: resolved existing user, compensation not required",
-            )
-            await _mark_idempotency_failed(
-                session=session,
-                idempotency_key=saga.idempotency_key,
-                error_code="order_not_created",
-                error_message=f"{reason}: order was not created",
-            )
-            return
-        await saga_repo.mark_compensation_pending(
-            session=session,
+async def _recover_user_resolved_saga(
+    saga_repository: OrderCreationSagaRepository,
+    *,
+    saga,
+    reason: str,
+) -> None:
+    if not saga.resolved_user_created:
+        # Пользователь существовал заранее, компенсация не требуется
+        await _mark_order_not_created(
+            saga_repository,
             saga=saga,
-            error=f"{reason}: user created without order",
+            reason=reason,
+            details="order was not created (existing user, no compensation)",
         )
         return
 
-    # Для USER_CREATE_REQUESTED email обязателен для повторного resolve
+    await saga_repository.mark_compensation_pending(
+        saga=saga,
+        error=f"{reason}: user created without order",
+    )
+
+
+async def _recover_started_saga(
+    saga_repository: OrderCreationSagaRepository,
+    client,
+    *,
+    saga,
+    reason: str,
+) -> None:
+    # Для started-саги email обязателен для повторного resolve
     if not saga.email:
-        await saga_repo.mark_failed(
-            session=session,
+        await saga_repository.mark_failed(
             saga=saga,
-            error=f"{reason}: missing email for user_create_requested",
-        )
-        await _mark_idempotency_failed(
-            session=session,
-            idempotency_key=saga.idempotency_key,
             error_code="invalid_saga_state",
-            error_message=f"{reason}: missing email for unresolved saga",
+            error_message=f"{reason}: missing email for stale started saga",
         )
         return
 
@@ -78,31 +74,51 @@ async def _recover_saga(session, client, *, saga, reason: str) -> None:
     )
     resolved_user = resolve_data["user"]
     resolved_created = resolve_data["created"]
-    await saga_repo.mark_user_created(
-        session=session,
+    await saga_repository.mark_user_resolved(
         saga=saga,
         user_id=UUID(resolved_user["id"]),
         user_created=resolved_created,
     )
     if resolved_created:
         # Если пользователя создали в рамках текущей саги, при сбое дальше нужна компенсация
-        await saga_repo.mark_compensation_pending(
-            session=session,
+        await saga_repository.mark_compensation_pending(
             saga=saga,
             error=f"{reason}: user created during reconciliation",
         )
         return
+
     # Если resolve вернул существующего пользователя, компенсировать нечего
-    await saga_repo.mark_failed(
-        session=session,
+    await _mark_order_not_created(
+        saga_repository,
         saga=saga,
-        error=f"{reason}: resolve returned existing user, compensation not required",
+        reason=reason,
+        details="resolve returned existing user, no compensation",
     )
-    await _mark_idempotency_failed(
-        session=session,
-        idempotency_key=saga.idempotency_key,
-        error_code="order_not_created",
-        error_message=f"{reason}: order was not created",
+
+
+async def _recover_saga(session, client, *, saga, reason: str) -> None:
+    saga_repository = OrderCreationSagaRepository(session)
+    if saga.status == OrderCreationSagaStatus.USER_RESOLVED:
+        await _recover_user_resolved_saga(
+            saga_repository,
+            saga=saga,
+            reason=reason,
+        )
+        return
+
+    if saga.status != OrderCreationSagaStatus.STARTED:
+        await saga_repository.mark_failed(
+            saga=saga,
+            error_code="invalid_saga_state",
+            error_message=f"{reason}: unsupported recovery status={saga.status}",
+        )
+        return
+
+    await _recover_started_saga(
+        saga_repository,
+        client,
+        saga=saga,
+        reason=reason,
     )
 
 
@@ -112,9 +128,9 @@ async def _run_recovery_pass(client, *, reason: str) -> None:
         seconds=settings.saga_recovery_grace_seconds
     )
     async with SessionFactory() as session:
+        saga_repository = OrderCreationSagaRepository(session)
         try:
-            sagas = await saga_repo.lock_recovery_candidates(
-                session,
+            sagas = await saga_repository.lock_recovery_candidates(
                 limit=settings.saga_worker_batch_size,
                 stale_before=stale_before,
             )
@@ -127,8 +143,9 @@ async def _run_recovery_pass(client, *, reason: str) -> None:
 
     for saga_id in saga_ids:
         async with SessionFactory() as session:
+            saga_repository = OrderCreationSagaRepository(session)
             try:
-                saga = await saga_repo.lock_by_id(session, saga_id=saga_id)
+                saga = await saga_repository.lock_by_id(saga_id=saga_id)
                 if not saga:
                     await session.commit()
                     continue
@@ -149,9 +166,9 @@ async def _run_startup_recovery(client) -> None:
 
 async def _process_pending_compensations(client) -> None:
     async with SessionFactory() as session:
+        saga_repository = OrderCreationSagaRepository(session)
         try:
-            sagas = await saga_repo.lock_pending_compensations(
-                session,
+            sagas = await saga_repository.lock_pending_compensations(
                 limit=settings.saga_worker_batch_size,
             )
             if not sagas:
@@ -161,28 +178,16 @@ async def _process_pending_compensations(client) -> None:
             for saga in sagas:
                 if saga.resolved_user_id is None:
                     # Компенсация невозможна без id пользователя
-                    await saga_repo.mark_failed(
-                        session=session,
+                    await saga_repository.mark_failed(
                         saga=saga,
-                        error="compensation skipped: missing resolved_user_id",
-                    )
-                    await _mark_idempotency_failed(
-                        session=session,
-                        idempotency_key=saga.idempotency_key,
                         error_code="compensation_failed",
                         error_message="Compensation failed: missing resolved_user_id",
                     )
                     continue
                 try:
-                    await users_client.delete_user(client, saga.resolved_user_id)
-                    # Успешная компенсация переводит сагу в COMPENSATED и ключ в FAILED
-                    await saga_repo.mark_compensated(session=session, saga=saga)
-                    await _mark_idempotency_failed(
-                        session=session,
-                        idempotency_key=saga.idempotency_key,
-                        error_code="compensated",
-                        error_message="Order creation failed and user compensation completed",
-                    )
+                    # Компенсация
+                    await users_client.cancel_user_for_order_saga(client, saga.resolved_user_id)
+                    await saga_repository.mark_compensated(saga=saga)
                     logger.info(
                         "saga compensated idempotency_key=%s saga_id=%s user_id=%s",
                         saga.idempotency_key,
@@ -191,18 +196,10 @@ async def _process_pending_compensations(client) -> None:
                     )
                 except Exception as exc:
                     # Ошибки компенсации переводим в retry с backoff до исчерпания лимита
-                    await saga_repo.schedule_retry(
-                        session=session,
+                    await saga_repository.schedule_retry(
                         saga=saga,
                         error=f"compensation failed: {exc}",
                     )
-                    if saga.status == OrderCreationSagaStatus.FAILED:
-                        await _mark_idempotency_failed(
-                            session=session,
-                            idempotency_key=saga.idempotency_key,
-                            error_code="compensation_failed",
-                            error_message=f"Compensation retries exhausted: {exc}",
-                        )
                     logger.warning(
                         "saga compensation retry scheduled idempotency_key=%s saga_id=%s retry_count=%s",
                         saga.idempotency_key,

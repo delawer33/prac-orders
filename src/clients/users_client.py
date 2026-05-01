@@ -87,7 +87,7 @@ def _is_retryable_exception(exception: BaseException) -> bool:
 async def _fetch_user(client: httpx.AsyncClient, user_id: UUID) -> Dict[str, Any]:
     response = await client.get(f"{USERS_API_PREFIX}/{user_id}")
     # оставляю raise_for status, т.к. фукнция вспомогательная
-    # и обработка httpx ошибок происходит ниже в фукнции get_user() 
+    # и обработка httpx ошибок происходит ниже в фукнции get_user()
     response.raise_for_status()
     return response.json()
 
@@ -110,7 +110,7 @@ async def _resolve_user(client: httpx.AsyncClient, email: str, external_request_
         json={"email": email, "external_request_id": external_request_id},
     )
     # оставляю raise_for status, т.к. фукнция вспомогательная
-    # и обработка httpx ошибок происходит ниже в фукнции resolve_user() 
+    # и обработка httpx ошибок происходит ниже в фукнции resolve_user()
     response.raise_for_status()
     return response.json()
 
@@ -127,11 +127,11 @@ async def _resolve_user(client: httpx.AsyncClient, email: str, external_request_
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
-async def _delete_user(client: httpx.AsyncClient, user_id: UUID) -> None:
-    response = await client.delete(f"{USERS_API_PREFIX}/{user_id}")
+async def _cancel_user_for_order_saga(client: httpx.AsyncClient, user_id: UUID) -> None:
+    response = await client.post(f"{USERS_API_PREFIX}/{user_id}/saga-cancellation")
     if response.status_code not in {204, 404}:
         # оставляю raise_for status, т.к. фукнция вспомогательная
-        # и обработка httpx ошибок происходит ниже в фукнции delete_user() 
+        # и обработка httpx ошибок происходит ниже в фукнции cancel_user_for_order_saga()
         response.raise_for_status()
 
 
@@ -165,9 +165,10 @@ async def resolve_user(client: httpx.AsyncClient, email: str, external_request_i
     return data
 
 
-async def delete_user(client: httpx.AsyncClient, user_id: UUID) -> None:
+async def cancel_user_for_order_saga(client: httpx.AsyncClient, user_id: UUID) -> None:
+    """Мягкая отмена пользователя для компенсации саги orders (без физического удаления)."""
     try:
-        await _delete_user(client, user_id)
+        await _cancel_user_for_order_saga(client, user_id)
     except CircuitBreakerError:
         logger.error("Circuit breaker open for '%s', rejecting request", users_breaker.name)
         raise UsersServiceUnavailableError()
@@ -175,11 +176,9 @@ async def delete_user(client: httpx.AsyncClient, user_id: UUID) -> None:
         logger.error("Transport error reaching users service after retries: %s", exc)
         raise UsersServiceUnavailableError() from exc
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in {404, 409}:
+        if exc.response.status_code == 409:
             logger.warning(
-                "compensation delete user ignored user_id=%s status=%s",
+                "saga cancellation rejected (active user) user_id=%s",
                 user_id,
-                exc.response.status_code,
             )
-            return
         raise UsersServiceError() from exc

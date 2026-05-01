@@ -13,6 +13,7 @@ from src.exceptions import (
     IdempotencyFailedError,
     IdempotencyInProgressError,
     OrderNotFoundError,
+    SagaInvariantError,
     UsersServiceError,
     UsersServiceUnavailableError,
 )
@@ -58,6 +59,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=_error_content(
                 request,
                 "database error",
+            ),
+        )
+
+    @app.exception_handler(SagaInvariantError)
+    async def saga_invariant_handler(
+        request: Request,
+        exc: SagaInvariantError,
+    ) -> JSONResponse:
+        logger.error("saga invariant violated: %s", exc.message)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=_error_content(
+                request,
+                "Order creation state error",
             ),
         )
 
