@@ -102,7 +102,7 @@ async def _resolve_user_step(
     saga: OrderCreationSagaModel,
     data: OrderCreate,
     idempotency_key: str,
-) -> UserRead:
+) -> UserRead:    
     try:
         if data.user_id is not None:
             user_data = await users_client.get_user(users_http_client, data.user_id)
