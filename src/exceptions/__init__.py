@@ -1,4 +1,5 @@
 from src.exceptions.base import AppError
+from src.exceptions.common import NotFoundError
 from src.exceptions.downstream import (
     DownstreamUserNotFoundError,
     UsersServiceError,
@@ -16,6 +17,7 @@ from src.exceptions.saga import SagaInvariantError
 __all__ = [
     "AppError",
     "IdempotencyKeyAlreadyExistsError",
+    "NotFoundError",
     "OrderNotFoundError",
     "IdempotencyConflictError",
     "IdempotencyInProgressError",

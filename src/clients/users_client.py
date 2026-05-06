@@ -81,7 +81,7 @@ def _is_retryable_exception(exception: BaseException) -> bool:
         exp_base=settings.users_service_retry_wait_exp_base,
         max=settings.users_service_retry_wait_max_seconds,
     ),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
     reraise=True,
 )
 async def _fetch_user(client: httpx.AsyncClient, user_id: UUID) -> Dict[str, Any]:
@@ -101,7 +101,7 @@ async def _fetch_user(client: httpx.AsyncClient, user_id: UUID) -> Dict[str, Any
         exp_base=settings.users_service_retry_wait_exp_base,
         max=settings.users_service_retry_wait_max_seconds,
     ),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
     reraise=True,
 )
 async def _resolve_user(client: httpx.AsyncClient, email: str, external_request_id: str) -> Dict[str, Any]:
@@ -124,7 +124,7 @@ async def _resolve_user(client: httpx.AsyncClient, email: str, external_request_
         exp_base=settings.users_service_retry_wait_exp_base,
         max=settings.users_service_retry_wait_max_seconds,
     ),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
     reraise=True,
 )
 async def _cancel_user_for_order_saga(client: httpx.AsyncClient, user_id: UUID) -> None:
@@ -139,15 +139,19 @@ async def get_user(client: httpx.AsyncClient, user_id: UUID) -> Dict[str, Any]:
     try:
         data = await _fetch_user(client, user_id)
     except CircuitBreakerError:
-        logger.error("Circuit breaker open for '%s', rejecting request", users_breaker.name)
-        raise UsersServiceUnavailableError()
+        err = UsersServiceUnavailableError()
+        err.log_detail = f"circuit breaker '{users_breaker.name}' open"
+        raise err
     except httpx.TransportError as exc:
-        logger.error("Transport error reaching users service after retries: %s", exc)
-        raise UsersServiceUnavailableError() from exc
+        err = UsersServiceUnavailableError()
+        err.log_detail = f"transport error after retries: {exc}"
+        raise err from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise DownstreamUserNotFoundError(str(user_id)) from exc
-        raise UsersServiceError() from exc
+        err = UsersServiceError()
+        err.log_detail = f"http {exc.response.status_code} from users service"
+        raise err from exc
     return data
 
 
@@ -155,13 +159,17 @@ async def resolve_user(client: httpx.AsyncClient, email: str, external_request_i
     try:
         data = await _resolve_user(client, email, external_request_id)
     except CircuitBreakerError:
-        logger.error("Circuit breaker open for '%s', rejecting request", users_breaker.name)
-        raise UsersServiceUnavailableError()
+        err = UsersServiceUnavailableError()
+        err.log_detail = f"circuit breaker '{users_breaker.name}' open"
+        raise err
     except httpx.TransportError as exc:
-        logger.error("Transport error reaching users service after retries: %s", exc)
-        raise UsersServiceUnavailableError() from exc
+        err = UsersServiceUnavailableError()
+        err.log_detail = f"transport error after retries: {exc}"
+        raise err from exc
     except httpx.HTTPStatusError as exc:
-        raise UsersServiceError() from exc
+        err = UsersServiceError()
+        err.log_detail = f"http {exc.response.status_code} from users service"
+        raise err from exc
     return data
 
 
@@ -170,15 +178,18 @@ async def cancel_user_for_order_saga(client: httpx.AsyncClient, user_id: UUID) -
     try:
         await _cancel_user_for_order_saga(client, user_id)
     except CircuitBreakerError:
-        logger.error("Circuit breaker open for '%s', rejecting request", users_breaker.name)
-        raise UsersServiceUnavailableError()
+        err = UsersServiceUnavailableError()
+        err.log_detail = f"circuit breaker '{users_breaker.name}' open"
+        raise err
     except httpx.TransportError as exc:
-        logger.error("Transport error reaching users service after retries: %s", exc)
-        raise UsersServiceUnavailableError() from exc
+        err = UsersServiceUnavailableError()
+        err.log_detail = f"transport error after retries: {exc}"
+        raise err from exc
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 409:
-            logger.warning(
-                "saga cancellation rejected (active user) user_id=%s",
-                user_id,
-            )
-        raise UsersServiceError() from exc
+        err = UsersServiceError()
+        err.log_detail = (
+            f"saga cancellation rejected (active user) user_id={user_id}"
+            if exc.response.status_code == 409
+            else f"http {exc.response.status_code} from users service"
+        )
+        raise err from exc

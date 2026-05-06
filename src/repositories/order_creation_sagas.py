@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.order_creation_sagas import (
@@ -23,35 +23,25 @@ class OrderCreationSagaRepository:
         )
         return result.scalar_one_or_none()
 
-    async def create_or_get(
+    async def upsert(
         self,
         *,
         idempotency_key: str,
         request_fingerprint: str,
         email: str | None,
-    ) -> OrderCreationSagaModel:
-        existing = await self.get_by_key(idempotency_key)
-        if existing:
-            return existing
-
-        saga = OrderCreationSagaModel(
-            idempotency_key=idempotency_key,
-            request_fingerprint=request_fingerprint,
-            email=email,
-            status=OrderCreationSagaStatus.STARTED,
+    ) -> None:
+        stmt = (
+            pg_insert(OrderCreationSagaModel)
+            .values(
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                email=email,
+                status=OrderCreationSagaStatus.STARTED,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
         )
-        self.session.add(saga)
-        try:
-            await self.session.flush()
-        except IntegrityError:
-            # Гонка: другой запрос уже вставил сагу с тем же ключом — откатываем и читаем существующую
-            await self.session.rollback()
-            existing = await self.get_by_key(idempotency_key)
-            if existing:
-                return existing
-            raise
-        await self.session.refresh(saga)
-        return saga
+        await self.session.execute(stmt)
+
 
     async def mark_user_resolved(
         self,

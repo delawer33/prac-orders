@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from src.clients.users_client import close_http_client, create_http_client
-from src.exception_handlers import register_exception_handlers
+from src.exceptions.exception_handlers import register_exception_handlers
 from src.logging_filters import RequestIdLogFilter
 from src.middleware.request_id import register_request_id_middleware
 from src.routers.orders import router as orders_router
@@ -23,6 +23,7 @@ def _configure_logging() -> None:
     request_id_filter = RequestIdLogFilter()
     for handler in logging.getLogger().handlers:
         handler.addFilter(request_id_filter)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 _configure_logging()

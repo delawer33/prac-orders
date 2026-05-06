@@ -71,7 +71,7 @@ async def _reload_saga_after_first_commit(
 ) -> OrderUser | OrderCreationSagaModel:
     saga = await saga_repository.get_by_key(idempotency_key)
     if not saga:
-        raise SagaInvariantError("saga missing after create_or_get")
+        raise SagaInvariantError("saga missing after upsert")
     # Параллельный запрос мог продвинуть сагу — отдаём тот же ответ, что и при повторе ключа
     if saga.status != OrderCreationSagaStatus.STARTED:
         return _resolve_replay_from_saga(saga, request_fingerprint=request_fingerprint)
@@ -139,7 +139,6 @@ async def _resolve_user_step(
     except Exception:
         # Прочие ошибки при резолве — помечаем сагу failed и пробрасываем дальше
         await _mark_saga_after_user_resolution_failure(session, saga_repository, idempotency_key)
-        logger.exception("unexpected user resolution failure idempotency_key=%s", idempotency_key)
         raise
 
     return user
@@ -167,24 +166,14 @@ async def _create_order_and_finalize_step(
         )
         # Конечное состояние саги фиксируем вместе с ответом для replay
         await session.commit()
-    except (SQLAlchemyError, ValueError) as exc:
+    except SQLAlchemyError:
         # Ошибки БД и инвариантов репозитория (например user_id не задан)
         await session.rollback()
-        logger.warning(
-            "order creation failed idempotency_key=%s",
-            idempotency_key,
-            exc_info=exc,
-        )
         await _persist_order_failure(saga_repository, idempotency_key)
         raise
-    except Exception as exc:
+    except Exception:
         # Неожиданные ошибки (не БД / не инвариант репозитория) — тот же путь фиксации саги
         await session.rollback()
-        logger.exception(
-            "unexpected order creation failure idempotency_key=%s",
-            idempotency_key,
-            exc_info=exc,
-        )
         await _persist_order_failure(saga_repository, idempotency_key)
         raise
 
@@ -258,7 +247,7 @@ async def create_order(
     if replay is not None:
         return replay
 
-    await saga_repository.create_or_get(
+    await saga_repository.upsert(
         idempotency_key=idempotency_key,
         request_fingerprint=request_fingerprint,
         email=str(data.email) if data.email is not None else None,
