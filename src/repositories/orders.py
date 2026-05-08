@@ -13,29 +13,32 @@ from src.schemas.orders import OrderCreate
 logger = logging.getLogger(__name__)
 
 
-async def get_order_with_items(session: AsyncSession, order_id: UUID) -> OrderModel | None:
-    result = await session.execute(
-        select(OrderModel)
-        .where(OrderModel.id == order_id)
-        .options(selectinload(OrderModel.items))
-    )
-    return result.scalar_one_or_none()
+class OrdersRepository:
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
 
+    async def get_order_with_items(self, order_id: UUID) -> OrderModel | None:
+        result = await self.db.execute(
+            select(OrderModel)
+            .where(OrderModel.id == order_id)
+            .options(selectinload(OrderModel.items))
+        )
+        return result.scalar_one_or_none()
 
-async def create_order(session: AsyncSession, data: OrderCreate) -> OrderModel:
-    if data.user_id is None:
-        raise SagaInvariantError("OrderCreate.user_id must be set before persistence")
+    async def create_order(self, data: OrderCreate) -> OrderModel:
+        if data.user_id is None:
+            raise SagaInvariantError("OrderCreate.user_id must be set before persistence")
 
-    order_kwargs = data.model_dump(include={"user_id", "title"})
-    order = OrderModel(**order_kwargs)
-    session.add(order)
-    await session.flush()
+        order_kwargs = data.model_dump(include={"user_id", "title"})
+        order = OrderModel(**order_kwargs)
+        self.db.add(order)
+        await self.db.flush()
 
-    for item_data in data.items:
-        item_kwargs = item_data.model_dump()
-        item = OrderItemModel(order_id=order.id, **item_kwargs)
-        session.add(item)
+        for item_data in data.items:
+            item_kwargs = item_data.model_dump()
+            item = OrderItemModel(order_id=order.id, **item_kwargs)
+            self.db.add(item)
 
-    await session.flush()
-    await session.refresh(order, ["items"])
-    return order
+        await self.db.flush()
+        await self.db.refresh(order, ["items"])
+        return order
