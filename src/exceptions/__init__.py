@@ -11,6 +11,7 @@ from src.exceptions.idempotency import (
     IdempotencyInProgressError,
     IdempotencyKeyAlreadyExistsError,
 )
+from src.exceptions.invariants import InvariantViolationError
 from src.exceptions.orders import OrderNotFoundError
 from src.exceptions.saga import SagaInvariantError
 
@@ -25,5 +26,6 @@ __all__ = [
     "UsersServiceUnavailableError",
     "UsersServiceError",
     "DownstreamUserNotFoundError",
+    "InvariantViolationError",
     "SagaInvariantError",
 ]

@@ -13,6 +13,7 @@ from src.exceptions import (
     IdempotencyConflictError,
     IdempotencyFailedError,
     IdempotencyInProgressError,
+    InvariantViolationError,
     OrderNotFoundError,
     SagaInvariantError,
     UsersServiceError,
@@ -27,8 +28,17 @@ logger = logging.getLogger(__name__)
 
 
 class OrdersService:
-    def __init__(self, repo: OrdersRepository) -> None:
+    def __init__(
+        self,
+        repo: OrdersRepository,
+        saga_repo: OrderCreationSagaRepository,
+    ) -> None:
+        if saga_repo.session is not repo.db:
+            raise InvariantViolationError(
+                "OrderCreationSagaRepository must use the same AsyncSession as OrdersRepository"
+            )
         self.repo = repo
+        self.saga_repo = saga_repo
 
     @property
     def db(self) -> AsyncSession:
@@ -56,13 +66,12 @@ class OrdersService:
 
     async def _try_replay_existing_saga(
         self,
-        saga_repository: OrderCreationSagaRepository,
         *,
         idempotency_key: str,
         request_fingerprint: str,
     ) -> OrderUser | None:
         # Уже есть сага по ключу — отдаём сохранённый результат или ошибку идемпотентности
-        existing_saga = await saga_repository.get_by_key(idempotency_key)
+        existing_saga = await self.saga_repo.get_by_key(idempotency_key)
         if not existing_saga:
             return None
         return self._resolve_replay_from_saga(
@@ -72,12 +81,11 @@ class OrdersService:
 
     async def _reload_saga_after_first_commit(
         self,
-        saga_repository: OrderCreationSagaRepository,
         *,
         idempotency_key: str,
         request_fingerprint: str,
     ) -> OrderUser | OrderCreationSagaModel:
-        saga = await saga_repository.get_by_key(idempotency_key)
+        saga = await self.saga_repo.get_by_key(idempotency_key)
         if not saga:
             raise SagaInvariantError("saga missing after upsert")
         # Параллельный запрос мог продвинуть сагу — отдаём тот же ответ, что и при повторе ключа
@@ -87,14 +95,13 @@ class OrdersService:
 
     async def _mark_saga_after_user_resolution_failure(
         self,
-        saga_repository: OrderCreationSagaRepository,
         idempotency_key: str,
     ) -> None:
         await self.db.rollback()
-        saga = await saga_repository.get_by_key(idempotency_key)
+        saga = await self.saga_repo.get_by_key(idempotency_key)
         if saga:
             # Не удалось достучаться до users / валидация — финализируем сагу как ошибочную
-            await saga_repository.mark_failed(
+            await self.saga_repo.mark_failed(
                 saga=saga,
                 error_code="user_resolution_failed",
                 error_message="User resolution failed",
@@ -104,7 +111,6 @@ class OrdersService:
     async def _resolve_user_step(
         self,
         users_http_client: httpx.AsyncClient,
-        saga_repository: OrderCreationSagaRepository,
         saga: OrderCreationSagaModel,
         data: OrderCreate,
         idempotency_key: str,
@@ -126,7 +132,7 @@ class OrdersService:
                 user = resolved.user
                 resolved_user_created = resolved.created
 
-            await saga_repository.mark_user_resolved(
+            await self.saga_repo.mark_user_resolved(
                 saga=saga,
                 user_id=user.id,
                 user_created=resolved_user_created,
@@ -135,14 +141,13 @@ class OrdersService:
             await self.db.commit()
         except Exception:
             # Прочие ошибки при резолве — помечаем сагу failed и пробрасываем дальше
-            await self._mark_saga_after_user_resolution_failure(saga_repository, idempotency_key)
+            await self._mark_saga_after_user_resolution_failure(idempotency_key)
             raise
 
         return user
 
     async def _create_order_and_finalize_step(
         self,
-        saga_repository: OrderCreationSagaRepository,
         saga: OrderCreationSagaModel,
         data: OrderCreate,
         user: UserRead,
@@ -155,7 +160,7 @@ class OrdersService:
                 order=OrderRead.model_validate(order),
                 user=user,
             )
-            await saga_repository.mark_order_created(
+            await self.saga_repo.mark_order_created(
                 saga=saga,
                 order_id=order.id,
                 response_body=response.model_dump(mode="json"),
@@ -165,12 +170,12 @@ class OrdersService:
         except SQLAlchemyError:
             # Ошибки БД и инвариантов репозитория (например user_id не задан)
             await self.db.rollback()
-            await self._persist_order_failure(saga_repository, idempotency_key)
+            await self._persist_order_failure(idempotency_key)
             raise
         except Exception:
             # Неожиданные ошибки (не БД / не инвариант репозитория) — тот же путь фиксации саги
             await self.db.rollback()
-            await self._persist_order_failure(saga_repository, idempotency_key)
+            await self._persist_order_failure(idempotency_key)
             raise
 
         logger.info("order created order_id=%s idempotency_key=%s", order.id, idempotency_key)
@@ -178,29 +183,28 @@ class OrdersService:
 
     async def _persist_order_failure(
         self,
-        saga_repository: OrderCreationSagaRepository,
         idempotency_key: str,
     ) -> None:
         # Вспомогательная логика: после сбоя создания заказа перевести сагу в failed или compensation_pending
-        saga = await saga_repository.get_by_key(idempotency_key)
+        saga = await self.saga_repo.get_by_key(idempotency_key)
         if not saga:
             return
         try:
             # Компенсация допустима только для пользователя, созданного этой сагой
             if saga.resolved_user_created and saga.resolved_user_id is not None:
-                await saga_repository.mark_compensation_pending(
+                await self.saga_repo.mark_compensation_pending(
                     saga=saga,
                     error="order creation failed",
                 )
             else:
-                await saga_repository.mark_failed(
+                await self.saga_repo.mark_failed(
                     saga=saga,
                     error_code="order_creation_failed",
                     error_message="Order creation failed",
                 )
-            await saga_repository.session.commit()
+            await self.db.commit()
         except Exception:
-            await saga_repository.session.rollback()
+            await self.db.rollback()
             # Воркер потом обработает этот случай
             logger.exception(
                 "failed to persist failure state idempotency_key=%s",
@@ -230,18 +234,16 @@ class OrdersService:
         data: OrderCreate,
         idempotency_key: str,
     ) -> OrderUser:
-        saga_repository = OrderCreationSagaRepository(self.db)
         request_fingerprint = self._build_request_fingerprint(data)
 
         replay = await self._try_replay_existing_saga(
-            saga_repository,
             idempotency_key=idempotency_key,
             request_fingerprint=request_fingerprint,
         )
         if replay is not None:
             return replay
 
-        await saga_repository.upsert(
+        await self.saga_repo.upsert(
             idempotency_key=idempotency_key,
             request_fingerprint=request_fingerprint,
             email=str(data.email) if data.email is not None else None,
@@ -250,7 +252,6 @@ class OrdersService:
         await self.db.commit()
 
         saga_or_response = await self._reload_saga_after_first_commit(
-            saga_repository,
             idempotency_key=idempotency_key,
             request_fingerprint=request_fingerprint,
         )
@@ -261,19 +262,17 @@ class OrdersService:
         # Резолв пользователя и фиксация checkpoint в саге
         user = await self._resolve_user_step(
             users_http_client,
-            saga_repository,
             saga,
             data,
             idempotency_key,
         )
 
-        saga = await saga_repository.get_by_key(idempotency_key)
+        saga = await self.saga_repo.get_by_key(idempotency_key)
         if not saga:
             raise SagaInvariantError("saga missing after user resolution")
 
         # Создание заказа и финализация саги/ответа для replay
         return await self._create_order_and_finalize_step(
-            saga_repository,
             saga,
             data,
             user,
