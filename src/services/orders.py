@@ -127,15 +127,6 @@ async def _resolve_user_step(
         )
         # Фиксируем этап резолва пользователя отдельно от создания заказа
         await session.commit()
-    except (
-        UsersServiceUnavailableError,
-        UsersServiceError,
-        DownstreamUserNotFoundError,
-        ValidationError,
-        SQLAlchemyError,
-    ):
-        await _mark_saga_after_user_resolution_failure(session, saga_repository, idempotency_key)
-        raise
     except Exception:
         # Прочие ошибки при резолве — помечаем сагу failed и пробрасываем дальше
         await _mark_saga_after_user_resolution_failure(session, saga_repository, idempotency_key)
