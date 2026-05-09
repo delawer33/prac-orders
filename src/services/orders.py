@@ -3,11 +3,10 @@ import json
 import logging
 from uuid import UUID
 
-import httpx
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.clients import users_client
+from src.clients.users_client import UsersGateway
 from src.exceptions import (
     DownstreamUserNotFoundError,
     IdempotencyConflictError,
@@ -110,21 +109,20 @@ class OrdersService:
 
     async def _resolve_user_step(
         self,
-        users_http_client: httpx.AsyncClient,
+        users: UsersGateway,
         saga: OrderCreationSagaModel,
         data: OrderCreate,
         idempotency_key: str,
     ) -> UserRead:
         try:
             if data.user_id is not None:
-                user_data = await users_client.get_user(users_http_client, data.user_id)
+                user_data = await users.get_user(data.user_id)
                 user = UserRead.model_validate(user_data)
                 resolved_user_created = False
             else:
                 # external_request_id == idempotency_key делает резолв пользователя
                 # идемпотентным между ретраями
-                resolve_response = await users_client.resolve_user(
-                    users_http_client,
+                resolve_response = await users.resolve_user(
                     str(data.email),
                     idempotency_key,
                 )
@@ -213,14 +211,14 @@ class OrdersService:
 
     async def get_order_enriched(
         self,
-        users_http_client: httpx.AsyncClient,
+        users: UsersGateway,
         order_id: UUID,
     ) -> OrderUser:
         order = await self.repo.get_order_with_items(order_id)
         if not order:
             raise OrderNotFoundError(str(order_id))
 
-        user_data = await users_client.get_user(users_http_client, order.user_id)
+        user_data = await users.get_user(order.user_id)
         user = UserRead.model_validate(user_data)
 
         return OrderUser(
@@ -230,7 +228,7 @@ class OrdersService:
 
     async def create_order(
         self,
-        users_http_client: httpx.AsyncClient,
+        users: UsersGateway,
         data: OrderCreate,
         idempotency_key: str,
     ) -> OrderUser:
@@ -261,7 +259,7 @@ class OrdersService:
 
         # Резолв пользователя и фиксация checkpoint в саге
         user = await self._resolve_user_step(
-            users_http_client,
+            users,
             saga,
             data,
             idempotency_key,

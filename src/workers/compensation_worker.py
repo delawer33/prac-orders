@@ -3,7 +3,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from src.clients import users_client
+from src.clients.users_client import (
+    HttpUsersGateway,
+    UsersGateway,
+    close_http_client,
+    create_http_client,
+)
 from src.config import Settings
 from src.db import SessionFactory
 from src.models.order_creation_sagas import OrderCreationSagaStatus
@@ -53,7 +58,7 @@ async def _recover_user_resolved_saga(
 
 async def _recover_started_saga(
     saga_repository: OrderCreationSagaRepository,
-    client,
+    users: UsersGateway,
     *,
     saga,
     reason: str,
@@ -67,8 +72,7 @@ async def _recover_started_saga(
         )
         return
 
-    resolve_data = await users_client.resolve_user(
-        client,
+    resolve_data = await users.resolve_user(
         saga.email,
         saga.idempotency_key,
     )
@@ -96,7 +100,7 @@ async def _recover_started_saga(
     )
 
 
-async def _recover_saga(session, client, *, saga, reason: str) -> None:
+async def _recover_saga(session, users: UsersGateway, *, saga, reason: str) -> None:
     saga_repository = OrderCreationSagaRepository(session)
     if saga.status == OrderCreationSagaStatus.USER_RESOLVED:
         await _recover_user_resolved_saga(
@@ -116,13 +120,13 @@ async def _recover_saga(session, client, *, saga, reason: str) -> None:
 
     await _recover_started_saga(
         saga_repository,
-        client,
+        users,
         saga=saga,
         reason=reason,
     )
 
 
-async def _run_recovery_pass(client, *, reason: str) -> None:
+async def _run_recovery_pass(users: UsersGateway, *, reason: str) -> None:
     # Сначала берем кандидатов в отдельной транзакции и фиксируем список id
     stale_before = datetime.now(timezone.utc) - timedelta(
         seconds=settings.saga_recovery_grace_seconds
@@ -149,7 +153,7 @@ async def _run_recovery_pass(client, *, reason: str) -> None:
                 if not saga:
                     await session.commit()
                     continue
-                await _recover_saga(session, client, saga=saga, reason=reason)
+                await _recover_saga(session, users, saga=saga, reason=reason)
                 await session.commit()
             except Exception:
                 await session.rollback()
@@ -160,11 +164,11 @@ async def _run_recovery_pass(client, *, reason: str) -> None:
                 )
 
 
-async def _run_startup_recovery(client) -> None:
-    await _run_recovery_pass(client, reason="startup recovery")
+async def _run_startup_recovery(users: UsersGateway) -> None:
+    await _run_recovery_pass(users, reason="startup recovery")
 
 
-async def _process_pending_compensations(client) -> None:
+async def _process_pending_compensations(users: UsersGateway) -> None:
     async with SessionFactory() as session:
         saga_repository = OrderCreationSagaRepository(session)
         try:
@@ -186,7 +190,7 @@ async def _process_pending_compensations(client) -> None:
                     continue
                 try:
                     # Компенсация
-                    await users_client.cancel_user_for_order_saga(client, saga.resolved_user_id)
+                    await users.cancel_user_for_order_saga(saga.resolved_user_id)
                     await saga_repository.mark_compensated(saga=saga)
                     logger.info(
                         "saga compensated idempotency_key=%s saga_id=%s user_id=%s",
@@ -217,18 +221,19 @@ async def run_worker() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    client = users_client.create_http_client()
+    client = create_http_client()
+    users = HttpUsersGateway(client)
     try:
-        await _run_startup_recovery(client)
+        await _run_startup_recovery(users)
         while True:
             try:
-                await _run_recovery_pass(client, reason="periodic recovery")
-                await _process_pending_compensations(client)
+                await _run_recovery_pass(users, reason="periodic recovery")
+                await _process_pending_compensations(users)
             except Exception:
                 logger.exception("worker iteration failed")
             await asyncio.sleep(settings.saga_worker_poll_interval_seconds)
     finally:
-        await users_client.close_http_client(client)
+        await close_http_client(client)
 
 
 if __name__ == "__main__":

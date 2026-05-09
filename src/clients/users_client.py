@@ -1,6 +1,6 @@
 import logging
 from datetime import timedelta
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, Protocol
 from uuid import UUID
 
 import httpx
@@ -10,9 +10,18 @@ from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_att
 
 from src.config import Settings
 from src.exceptions import DownstreamUserNotFoundError, UsersServiceError, UsersServiceUnavailableError
+
 logger = logging.getLogger(__name__)
 settings = Settings()
 USERS_API_PREFIX = settings.users_service_api_prefix
+
+
+class UsersGateway(Protocol):
+    async def get_user(self, user_id: UUID) -> Dict[str, Any]: ...
+
+    async def resolve_user(self, email: str, external_request_id: str) -> Dict[str, Any]: ...
+
+    async def cancel_user_for_order_saga(self, user_id: UUID) -> None: ...
 
 
 def create_http_client() -> httpx.AsyncClient:
@@ -26,11 +35,11 @@ async def close_http_client(client: httpx.AsyncClient) -> None:
     await client.aclose()
 
 
-def get_http_client(request: Request) -> httpx.AsyncClient:
-    return request.app.state.users_http_client
+def get_users_gateway(request: Request) -> UsersGateway:
+    return HttpUsersGateway(request.app.state.users_http_client)
 
 
-UsersHttpClientDep = Annotated[httpx.AsyncClient, Depends(get_http_client)]
+UsersGatewayDep = Annotated[UsersGateway, Depends(get_users_gateway)]
 
 
 class _StateLogger(CircuitBreakerListener):
@@ -193,3 +202,19 @@ async def cancel_user_for_order_saga(client: httpx.AsyncClient, user_id: UUID) -
             else f"http {exc.response.status_code} from users service"
         )
         raise err from exc
+
+
+class HttpUsersGateway:
+    __slots__ = ("_client",)
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._client = client
+
+    async def get_user(self, user_id: UUID) -> Dict[str, Any]:
+        return await get_user(self._client, user_id)
+
+    async def resolve_user(self, email: str, external_request_id: str) -> Dict[str, Any]:
+        return await resolve_user(self._client, email, external_request_id)
+
+    async def cancel_user_for_order_saga(self, user_id: UUID) -> None:
+        await cancel_user_for_order_saga(self._client, user_id)
