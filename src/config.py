@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     saga_worker_batch_size: int = Field(default=20, env='saga_worker_batch_size')
     saga_recovery_grace_seconds: int = Field(default=30, env='saga_recovery_grace_seconds')
 
+    # Kafka
+    kafka_bootstrap_servers: str = Field(default='localhost:9092', env='kafka_bootstrap_servers')
+    kafka_order_created_topic: str = Field(default='orders.order-created', env='kafka_order_created_topic')
+    kafka_outbox_poll_interval_seconds: int = Field(default=5, env='kafka_outbox_poll_interval_seconds')
+    kafka_outbox_batch_size: int = Field(default=100, env='kafka_outbox_batch_size')
+
     # Local app runtime
     app_host: str = Field(default='localhost', env='app_host')
     app_port: int = Field(default=8001, env='app_port')
