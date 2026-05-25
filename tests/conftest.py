@@ -15,6 +15,7 @@ TEST_DB_URL = os.getenv("TEST_POSTGRES_URL", "postgresql+asyncpg://postgres:1234
 async def _make_session() -> AsyncGenerator[AsyncSession, None]:
     eng = create_async_engine(TEST_DB_URL, echo=False)
     async with eng.begin() as conn:
+        await conn.run_sync(metadata.drop_all)
         await conn.run_sync(metadata.create_all)
     session_maker = async_sessionmaker(eng, expire_on_commit=False)
     async with session_maker() as session:

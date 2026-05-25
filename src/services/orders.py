@@ -21,7 +21,6 @@ from src.exceptions import (
 from src.models.order_creation_sagas import OrderCreationSagaModel, OrderCreationSagaStatus
 from src.repositories.order_creation_sagas import OrderCreationSagaRepository
 from src.repositories.orders import OrdersRepository
-from src.repositories.outbox import OutboxRepository
 from src.schemas.orders import OrderCreate, OrderRead, OrderUser, UserRead, UserResolveResponse
 
 logger = logging.getLogger(__name__)
@@ -32,19 +31,13 @@ class OrdersService:
         self,
         repo: OrdersRepository,
         saga_repo: OrderCreationSagaRepository,
-        outbox_repo: OutboxRepository,
     ) -> None:
         if saga_repo.session is not repo.db:
             raise InvariantViolationError(
                 "OrderCreationSagaRepository must use the same AsyncSession as OrdersRepository"
             )
-        if outbox_repo.session is not repo.db:
-            raise InvariantViolationError(
-                "OutboxRepository must use the same AsyncSession as OrdersRepository"
-            )
         self.repo = repo
         self.saga_repo = saga_repo
-        self.outbox_repo = outbox_repo
 
     @property
     def db(self) -> AsyncSession:
@@ -170,24 +163,6 @@ class OrdersService:
                 order_id=order.id,
                 response_body=response.model_dump(mode="json"),
             )
-            total_amount = round(
-                sum(float(item.price) * item.quantity for item in order.items), 2
-            )
-            await self.outbox_repo.insert_event(
-                event_id=order.id,
-                payload={
-                    "event_id": str(order.id),
-                    "event_type": "OrderCreated",
-                    "occurred_at": order.created_at.isoformat(),
-                    "data": {
-                        "order_id": str(order.id),
-                        "user_id": str(order.user_id),
-                        "total_amount": total_amount,
-                        "created_at": order.created_at.isoformat(),
-                    },
-                },
-            )
-            # Конечное состояние саги, ответ для replay и outbox-запись атомарно
             await self.db.commit()
         except SQLAlchemyError:
             # Ошибки БД и инвариантов репозитория (например user_id не задан)

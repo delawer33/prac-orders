@@ -75,7 +75,7 @@ services:
     networks:
       - int-services
     command: >
-      sh -c "python -m src.workers.outbox_relay"
+      sh -c "python -m src.workers.order_feedback_outbox_relay"
 
   kafka:
     container_name: kafka

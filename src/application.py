@@ -9,6 +9,7 @@ from src.clients.users_client import close_http_client, create_http_client
 from src.exceptions.exception_handlers import register_exception_handlers
 from src.logging_filters import RequestIdLogFilter
 from src.middleware.request_id import register_request_id_middleware
+from src.routers.feedbacks import router as feedbacks_router
 from src.routers.orders import router as orders_router
 
 
@@ -54,5 +55,6 @@ def get_app() -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(orders_router)
+    app.include_router(feedbacks_router)
 
     return app

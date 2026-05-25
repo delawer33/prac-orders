@@ -35,7 +35,10 @@ class Settings(BaseSettings):
 
     # Kafka
     kafka_bootstrap_servers: str = Field(default='localhost:9092', env='kafka_bootstrap_servers')
-    kafka_order_created_topic: str = Field(default='orders.order-created', env='kafka_order_created_topic')
+    kafka_order_feedback_created_topic: str = Field(
+        default='orders.order-feedback-created',
+        env='kafka_order_feedback_created_topic',
+    )
     kafka_outbox_poll_interval_seconds: int = Field(default=5, env='kafka_outbox_poll_interval_seconds')
     kafka_outbox_batch_size: int = Field(default=100, env='kafka_outbox_batch_size')
 
