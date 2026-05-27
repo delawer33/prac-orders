@@ -27,6 +27,7 @@ class OrderFeedbackCreatedEvent(BaseModel):
 
 class OrderFeedbackOutboxStatus:
     PENDING = "pending"
+    PROCESSING = "processing"
     PUBLISHED = "published"
 
 
@@ -40,4 +41,5 @@ class OrderFeedbackCreatedOutboxModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
     )
+    claimed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)

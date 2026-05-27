@@ -35,12 +35,14 @@ class Settings(BaseSettings):
 
     # Kafka
     kafka_bootstrap_servers: str = Field(default='localhost:9092', env='kafka_bootstrap_servers')
+    # at least once delivery - consumer должен быть идемпотентным
     kafka_order_feedback_created_topic: str = Field(
         default='orders.order-feedback-created',
         env='kafka_order_feedback_created_topic',
     )
     kafka_outbox_poll_interval_seconds: int = Field(default=5, env='kafka_outbox_poll_interval_seconds')
     kafka_outbox_batch_size: int = Field(default=100, env='kafka_outbox_batch_size')
+    kafka_outbox_processing_timeout_seconds: int = Field(default=60, env='kafka_outbox_processing_timeout_seconds')
 
     # Local app runtime
     app_host: str = Field(default='localhost', env='app_host')

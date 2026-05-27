@@ -14,7 +14,6 @@ class OrderFeedbacksRepository:
         feedback = OrderFeedbackModel(order_id=data.order_id, text=data.text)
         self.db.add(feedback)
         await self.db.flush()
-        await self.db.refresh(feedback)
         return feedback
 
     async def get_by_id(self, feedback_id: UUID) -> OrderFeedbackModel | None:

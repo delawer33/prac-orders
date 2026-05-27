@@ -1,7 +1,9 @@
+import sqlalchemy as sa
 from uuid import uuid4
 
 import pytest
 
+from src.models.order_feedback_outbox import OrderFeedbackOutboxStatus
 from src.repositories.order_creation_sagas import OrderCreationSagaRepository
 from src.repositories.order_feedbacks import OrderFeedbacksRepository
 from src.repositories.orders import OrdersRepository
@@ -90,3 +92,54 @@ async def test_create_feedback_writes_pending_outbox_row(db_session):
     assert payload["data"]["order_id"] == str(order_result.order.id)
     assert payload["data"]["user_id"] == str(_FAKE_USER_ID)
     assert "text" not in payload["data"]
+
+
+async def test_reclaim_processing_resets_timed_out_rows(db_session):
+    repo = OrderFeedbackOutboxRepository(db_session)
+
+    feedback_id = uuid4()
+    row = await _insert_processing_row(db_session, feedback_id, claimed_seconds_ago=120)
+
+    await repo.reclaim_processing(timeout_seconds=60)
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert row.status == OrderFeedbackOutboxStatus.PENDING
+    assert row.claimed_at is None
+
+
+async def test_reclaim_processing_does_not_reset_recent_rows(db_session):
+    repo = OrderFeedbackOutboxRepository(db_session)
+
+    feedback_id = uuid4()
+    row = await _insert_processing_row(db_session, feedback_id, claimed_seconds_ago=10)
+
+    await repo.reclaim_processing(timeout_seconds=60)
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert row.status == OrderFeedbackOutboxStatus.PROCESSING
+
+
+async def _insert_processing_row(db_session, feedback_id, *, claimed_seconds_ago: int):
+    from src.models.order_feedback_outbox import OrderFeedbackCreatedOutboxModel
+    row = OrderFeedbackCreatedOutboxModel(
+        event_id=feedback_id,
+        status=OrderFeedbackOutboxStatus.PROCESSING,
+        payload={
+            "event_id": str(feedback_id),
+            "event_type": "OrderFeedbackCreated",
+            "occurred_at": "2024-06-01T12:00:00+00:00",
+            "data": {"feedback_id": str(feedback_id), "order_id": str(uuid4()), "user_id": str(uuid4())},
+        },
+    )
+    db_session.add(row)
+    await db_session.flush()
+    await db_session.execute(
+        sa.update(OrderFeedbackCreatedOutboxModel)
+        .where(OrderFeedbackCreatedOutboxModel.id == row.id)
+        .values(claimed_at=sa.func.now() - sa.text(f"interval '{claimed_seconds_ago} seconds'"))
+    )
+    await db_session.flush()
+    await db_session.refresh(row)
+    return row

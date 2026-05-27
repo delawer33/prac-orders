@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import timedelta
 
 import sqlalchemy as sa
 from sqlalchemy import select
@@ -29,26 +29,38 @@ class OrderFeedbackOutboxRepository:
         return list(result.scalars())
 
     async def claim_pending_batch(self, *, limit: int) -> list[OrderFeedbackCreatedOutboxModel]:
-        result = await self.session.execute(
-            select(OrderFeedbackCreatedOutboxModel)
+        subquery = (
+            select(OrderFeedbackCreatedOutboxModel.id)
             .where(OrderFeedbackCreatedOutboxModel.status == OrderFeedbackOutboxStatus.PENDING)
             .order_by(OrderFeedbackCreatedOutboxModel.created_at.asc())
             .limit(limit)
+            .with_for_update(skip_locked=True)
+            .scalar_subquery()
+        )
+        result = await self.session.execute(
+            sa.update(OrderFeedbackCreatedOutboxModel)
+            .where(OrderFeedbackCreatedOutboxModel.id.in_(subquery))
+            .values(status=OrderFeedbackOutboxStatus.PROCESSING, claimed_at=sa.func.now())
+            .returning(OrderFeedbackCreatedOutboxModel)
         )
         return list(result.scalars())
+
+    async def reclaim_processing(self, *, timeout_seconds: int) -> None:
+        await self.session.execute(
+            sa.update(OrderFeedbackCreatedOutboxModel)
+            .where(
+                OrderFeedbackCreatedOutboxModel.status == OrderFeedbackOutboxStatus.PROCESSING,
+                OrderFeedbackCreatedOutboxModel.claimed_at < sa.func.now() - timedelta(seconds=timeout_seconds),
+            )
+            .values(status=OrderFeedbackOutboxStatus.PENDING, claimed_at=None)
+        )
 
     async def mark_published(self, rows: list[OrderFeedbackCreatedOutboxModel]) -> None:
         if not rows:
             return
         ids = [row.id for row in rows]
-        published_at = datetime.now(timezone.utc)
         await self.session.execute(
             sa.update(OrderFeedbackCreatedOutboxModel)
             .where(OrderFeedbackCreatedOutboxModel.id.in_(ids))
-            .values(status=OrderFeedbackOutboxStatus.PUBLISHED, published_at=published_at)
+            .values(status=OrderFeedbackOutboxStatus.PUBLISHED, published_at=sa.func.now())
         )
-        await self.session.flush()
-        for row in rows:
-            row.status = OrderFeedbackOutboxStatus.PUBLISHED
-            row.published_at = published_at
-

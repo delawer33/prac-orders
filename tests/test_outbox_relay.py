@@ -59,12 +59,34 @@ async def test_relay_rows_stops_on_kafka_error_marks_only_sent_rows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reclaim_processing_calls_repo_and_commits() -> None:
+    relay = _relay()
+    repo = MagicMock()
+    repo.reclaim_processing = AsyncMock()
+    session = AsyncMock()
+
+    with (
+        patch("src.workers.order_feedback_outbox_relay.SessionFactory") as session_factory,
+        patch("src.workers.order_feedback_outbox_relay.OrderFeedbackOutboxRepository", return_value=repo),
+    ):
+        session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await relay._reclaim_processing()
+
+    repo.reclaim_processing.assert_awaited_once_with(
+        timeout_seconds=relay._settings.kafka_outbox_processing_timeout_seconds
+    )
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_publish_pending_rows_claims_and_relays() -> None:
     relay = _relay()
     row = _row()
     repo = MagicMock()
     repo.claim_pending_batch = AsyncMock(return_value=[row])
-    session = MagicMock()
+    session = AsyncMock()
 
     with (
         patch("src.workers.order_feedback_outbox_relay.SessionFactory") as session_factory,

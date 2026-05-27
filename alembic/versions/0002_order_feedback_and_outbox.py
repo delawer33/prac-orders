@@ -35,6 +35,7 @@ def upgrade() -> None:
         sa.Column("payload", sa.JSON(), nullable=False),
         sa.Column("status", sa.String(length=20), nullable=False, server_default="pending"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("event_id"),
