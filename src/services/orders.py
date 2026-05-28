@@ -163,7 +163,6 @@ class OrdersService:
                 order_id=order.id,
                 response_body=response.model_dump(mode="json"),
             )
-            # Конечное состояние саги фиксируем вместе с ответом для replay
             await self.db.commit()
         except SQLAlchemyError:
             # Ошибки БД и инвариантов репозитория (например user_id не задан)
